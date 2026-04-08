@@ -30,3 +30,6 @@ model.pkl
 Thumbs.db
 # MLflow database
 mlflow.db
+
+# Jupyter notebooks
+notebooks/*.ipynb
