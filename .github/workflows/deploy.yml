@@ -1,1 +1,220 @@
-# CI/CD pipeline
+name: Telco Churn CI Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+
+  # ── Job 1: Test ──────────────────────────────────────────────────────────────
+  test:
+    name: Run Pipeline Tests
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create test data
+        run: |
+          python - <<'EOF'
+          import pandas as pd
+          import numpy as np
+
+          np.random.seed(42)
+          n = 200
+
+          def rand_choice(options, n):
+              return np.random.choice(options, n)
+
+          df = pd.DataFrame({
+              'customerID':       [f'ID-{i}' for i in range(n)],
+              'gender':           rand_choice(['Male', 'Female'], n),
+              'SeniorCitizen':    np.random.randint(0, 2, n),
+              'Partner':          rand_choice(['Yes', 'No'], n),
+              'Dependents':       rand_choice(['Yes', 'No'], n),
+              'tenure':           np.random.randint(1, 72, n),
+              'PhoneService':     rand_choice(['Yes', 'No'], n),
+              'MultipleLines':    rand_choice(['Yes', 'No', 'No phone service'], n),
+              'InternetService':  rand_choice(['DSL', 'Fiber optic', 'No'], n),
+              'OnlineSecurity':   rand_choice(['Yes', 'No', 'No internet service'], n),
+              'OnlineBackup':     rand_choice(['Yes', 'No', 'No internet service'], n),
+              'DeviceProtection': rand_choice(['Yes', 'No', 'No internet service'], n),
+              'TechSupport':      rand_choice(['Yes', 'No', 'No internet service'], n),
+              'StreamingTV':      rand_choice(['Yes', 'No', 'No internet service'], n),
+              'StreamingMovies':  rand_choice(['Yes', 'No', 'No internet service'], n),
+              'Contract':         rand_choice(['Month-to-month', 'One year', 'Two year'], n),
+              'PaperlessBilling': rand_choice(['Yes', 'No'], n),
+              'PaymentMethod':    rand_choice(['Electronic check', 'Mailed check',
+                                              'Bank transfer (automatic)',
+                                              'Credit card (automatic)'], n),
+              'MonthlyCharges':   np.random.uniform(20, 100, n).round(2),
+              'Total_Charges':    np.random.uniform(100, 5000, n).round(2),
+              'Churn':            rand_choice(['Yes', 'No'], n),
+          })
+
+          import os
+          os.makedirs('src/data', exist_ok=True)
+          df.to_csv('src/data/test_churn.csv', index=False)
+          print(f"Test data created: {len(df)} rows")
+          EOF
+
+      - name: Run pipeline
+        run: |
+          python -m scripts.run_pipeline \
+            --file "src/data/test_churn.csv"
+
+      - name: Confirm artifact exists
+        run: |
+          python - <<'EOF'
+          import joblib
+          from pathlib import Path
+
+          path = Path('model.pkl')
+          assert path.exists(), "model.pkl not found"
+
+          artifact = joblib.load(path)
+          assert 'model'        in artifact, "model key missing"
+          assert 'threshold'    in artifact, "threshold key missing"
+          assert 'feature_cols' in artifact, "feature_cols key missing"
+
+          print(f"Artifact valid")
+          print(f"Threshold     : {artifact['threshold']}")
+          print(f"Feature cols  : {len(artifact['feature_cols'])}")
+          EOF
+
+      - name: Test inference
+        run: |
+          python - <<'EOF'
+          import sys
+          sys.path.append('.')
+          from src.serving.inference import predict
+
+          test_customer = {
+              "gender":           "Female",
+              "SeniorCitizen":    0,
+              "Partner":          "Yes",
+              "Dependents":       "No",
+              "tenure":           12,
+              "PhoneService":     "Yes",
+              "MultipleLines":    "No",
+              "InternetService":  "Fiber optic",
+              "OnlineSecurity":   "No",
+              "OnlineBackup":     "No",
+              "DeviceProtection": "No",
+              "TechSupport":      "No",
+              "StreamingTV":      "No",
+              "StreamingMovies":  "No",
+              "Contract":         "Month-to-month",
+              "PaperlessBilling": "Yes",
+              "PaymentMethod":    "Electronic check",
+              "MonthlyCharges":   70.35,
+              "Total_Charges":    845.50,
+          }
+
+          result = predict(test_customer)
+
+          assert 'churn'             in result
+          assert 'churn_probability' in result
+          assert 'threshold_used'    in result
+          assert result['churn_probability'] >= 0
+          assert result['churn_probability'] <= 1
+
+          print(f"Inference test passed")
+          print(f"Churn         : {result['churn']}")
+          print(f"Probability   : {result['churn_probability']}")
+          print(f"Threshold     : {result['threshold_used']}")
+          EOF
+
+  # ── Job 2: Build Docker ───────────────────────────────────────────────────────
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create test data and artifact
+        run: |
+          python - <<'EOF'
+          import pandas as pd
+          import numpy as np
+
+          np.random.seed(42)
+          n = 200
+
+          def rand_choice(options, n):
+              return np.random.choice(options, n)
+
+          df = pd.DataFrame({
+              'customerID':       [f'ID-{i}' for i in range(n)],
+              'gender':           rand_choice(['Male', 'Female'], n),
+              'SeniorCitizen':    np.random.randint(0, 2, n),
+              'Partner':          rand_choice(['Yes', 'No'], n),
+              'Dependents':       rand_choice(['Yes', 'No'], n),
+              'tenure':           np.random.randint(1, 72, n),
+              'PhoneService':     rand_choice(['Yes', 'No'], n),
+              'MultipleLines':    rand_choice(['Yes', 'No', 'No phone service'], n),
+              'InternetService':  rand_choice(['DSL', 'Fiber optic', 'No'], n),
+              'OnlineSecurity':   rand_choice(['Yes', 'No', 'No internet service'], n),
+              'OnlineBackup':     rand_choice(['Yes', 'No', 'No internet service'], n),
+              'DeviceProtection': rand_choice(['Yes', 'No', 'No internet service'], n),
+              'TechSupport':      rand_choice(['Yes', 'No', 'No internet service'], n),
+              'StreamingTV':      rand_choice(['Yes', 'No', 'No internet service'], n),
+              'StreamingMovies':  rand_choice(['Yes', 'No', 'No internet service'], n),
+              'Contract':         rand_choice(['Month-to-month', 'One year', 'Two year'], n),
+              'PaperlessBilling': rand_choice(['Yes', 'No'], n),
+              'PaymentMethod':    rand_choice(['Electronic check', 'Mailed check',
+                                              'Bank transfer (automatic)',
+                                              'Credit card (automatic)'], n),
+              'MonthlyCharges':   np.random.uniform(20, 100, n).round(2),
+              'Total_Charges':    np.random.uniform(100, 5000, n).round(2),
+              'Churn':            rand_choice(['Yes', 'No'], n),
+          })
+
+          import os
+          os.makedirs('src/data', exist_ok=True)
+          df.to_csv('src/data/test_churn.csv', index=False)
+          EOF
+          python -m scripts.run_pipeline --file "src/data/test_churn.csv"
+
+      - name: Build Docker image
+        run: docker build -t churn-api .
+
+      - name: Test container health
+        run: |
+          docker run -d -p 8000:8000 --name test-container churn-api
+          sleep 15
+          curl -f http://localhost:8000/health || exit 1
+          docker stop test-container
+          echo "Container health check passed"
